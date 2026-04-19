@@ -189,6 +189,19 @@
                     </toolkit:SettingsExpander.Items>
                 </toolkit:SettingsExpander>
 
+                <toolkit:SettingsCard
+                    Description="Match each .txt file's name to an audiobook part and import its bookmarks."
+                    Header="Import Musicolet Bookmarks"
+                    x:Name="ImportMusicoletCard">
+                    <toolkit:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE8A4;" />
+                    </toolkit:SettingsCard.HeaderIcon>
+                    <Button
+                        Click="ImportMusicoletBookmarks_Click"
+                        Content="Choose .txt files"
+                        x:Name="ImportMusicoletButton" />
+                </toolkit:SettingsCard>
+
                 <!--  Donate  -->
                 <TextBlock Style="{StaticResource SettingsSectionHeaderTextBlockStyle}" Text="Donate" />
 

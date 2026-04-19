@@ -238,6 +238,61 @@ public static class DialogService
         });
     }
 
+    internal static async Task<(ContentDialogResult result, string note)>
+        ShowBookmarkEditDialogAsync(string title, string locationText, string initialNote)
+    {
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null) return (ContentDialogResult.None, initialNote ?? string.Empty);
+
+        var result = ContentDialogResult.None;
+        var note = initialNote ?? string.Empty;
+
+        await _dispatcherQueue.EnqueueAsync(async () =>
+        {
+            var dialog = new BookmarkEditDialog(title, locationText, initialNote ?? string.Empty)
+            {
+                XamlRoot = App.Window.Content.XamlRoot,
+                RequestedTheme = ThemeHelper.ActualTheme
+            };
+
+            result = await dialog.ShowOneAtATimeAsync();
+            note = dialog.NoteText ?? string.Empty;
+        });
+
+        return (result, note);
+    }
+
+    internal static async Task<(BookmarkConflictChoice choice, bool applyToAll)>
+        ShowBookmarkConflictDialogAsync(string locationText, string existingNote, string newNote)
+    {
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null)
+            return (BookmarkConflictChoice.KeepExisting, false);
+
+        var choice = BookmarkConflictChoice.KeepExisting;
+        var applyToAll = false;
+
+        await _dispatcherQueue.EnqueueAsync(async () =>
+        {
+            var dialog = new BookmarkConflictDialog(locationText, existingNote, newNote)
+            {
+                XamlRoot = App.Window.Content.XamlRoot,
+                RequestedTheme = ThemeHelper.ActualTheme
+            };
+
+            var result = await dialog.ShowOneAtATimeAsync();
+            applyToAll = dialog.ApplyToAll;
+            choice = result switch
+            {
+                ContentDialogResult.Primary => BookmarkConflictChoice.KeepBoth,
+                ContentDialogResult.Secondary => BookmarkConflictChoice.Replace,
+                _ => BookmarkConflictChoice.KeepExisting
+            };
+        });
+
+        return (choice, applyToAll);
+    }
+
     internal static async Task ShowProgressDialogAsync(string title, CancellationTokenSource? cts,
         bool showCancelButton = true)
     {

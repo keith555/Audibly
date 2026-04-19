@@ -4,6 +4,7 @@
 using System;
 using Audibly.App.Extensions;
 using Audibly.App.Helpers;
+using Audibly.App.Services;
 using Audibly.App.ViewModels;
 using Audibly.App.Views;
 using Audibly.Models;
@@ -24,6 +25,7 @@ public sealed partial class PlayerControlGrid : UserControl
     {
         InitializeComponent();
         AudioPlayer.SetMediaPlayer(PlayerViewModel.MediaPlayer);
+        BookmarksFlyoutContent.HostFlyout = BookmarksFlyout;
     }
 
     /// <summary>
@@ -120,6 +122,21 @@ public sealed partial class PlayerControlGrid : UserControl
     private void TimerButton_OnClick(object sender, RoutedEventArgs e)
     {
         // todo
+    }
+
+    private async void SaveBookmarkButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (PlayerViewModel.NowPlaying == null) return;
+
+        var positionMs = (long)PlayerViewModel.CurrentPosition.TotalMilliseconds;
+        var sourceFileId = PlayerViewModel.NowPlaying.CurrentSourceFile.Id;
+        var stub = new Bookmark { SourceFileId = sourceFileId, PositionMs = positionMs };
+        var location = PlayerViewModel.FormatBookmarkLocation(stub);
+
+        var (result, note) = await DialogService.ShowBookmarkEditDialogAsync("Save bookmark", location, string.Empty);
+        if (result != ContentDialogResult.Primary) return;
+
+        await PlayerViewModel.SaveBookmarkAsync(sourceFileId, positionMs, note);
     }
 
     private void TimerMenuItem_Click(object sender, RoutedEventArgs e)

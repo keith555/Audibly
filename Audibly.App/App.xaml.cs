@@ -81,7 +81,8 @@ public partial class App : Application
     /// </summary>
     public static MainViewModel ViewModel { get; } =
         new(new FileImportService(), new AppDataService(),
-            new LoggingService(ApplicationData.Current.LocalFolder.Path + @"\Audibly.log"), new FileDialogService());
+            new LoggingService(ApplicationData.Current.LocalFolder.Path + @"\Audibly.log"), new FileDialogService(),
+            new BookmarkImportService());
 
     /// <summary>
     ///     Gets the app-wide PlayerViewModel singleton instance.

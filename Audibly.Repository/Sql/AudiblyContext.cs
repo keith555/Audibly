@@ -54,4 +54,6 @@ public class AudiblyContext : DbContext
     public DbSet<ChapterInfo> Chapters { get; set; }
 
     public DbSet<SourceFile> SourceFiles { get; set; }
+
+    public DbSet<Bookmark> Bookmarks { get; set; }
 }

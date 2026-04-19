@@ -216,6 +216,44 @@
                     </Button>
                     <!--#endregion PlaybackSpeedButton-->
 
+                    <!--#region SaveBookmarkButton-->
+                    <Button
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Click="SaveBookmarkButton_OnClick"
+                        IsEnabled="{x:Bind vm:Converters.IsNotNull(PlayerViewModel.NowPlaying), Mode=OneWay}"
+                        ToolTipService.ToolTip="Save bookmark at current position"
+                        x:Name="SaveBookmarkButton">
+                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE1CB;" />
+                    </Button>
+                    <!--#endregion SaveBookmarkButton-->
+
+                    <!--#region BookmarksButton-->
+                    <Button
+                        Background="Transparent"
+                        BorderThickness="0"
+                        IsEnabled="{x:Bind vm:Converters.IsNotNull(PlayerViewModel.NowPlaying), Mode=OneWay}"
+                        ToolTipService.ToolTip="Bookmarks"
+                        x:Name="BookmarksButton">
+                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE8A4;" />
+                        <Button.Flyout>
+                            <Flyout Placement="Top" x:Name="BookmarksFlyout">
+                                <Flyout.FlyoutPresenterStyle>
+                                    <Style TargetType="FlyoutPresenter">
+                                        <Setter Property="MinWidth" Value="380" />
+                                        <Setter Property="MaxWidth" Value="480" />
+                                        <Setter Property="MaxHeight" Value="480" />
+                                        <Setter Property="CornerRadius" Value="4" />
+                                        <Setter Property="ScrollViewer.HorizontalScrollMode" Value="Disabled" />
+                                        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+                                    </Style>
+                                </Flyout.FlyoutPresenterStyle>
+                                <local:BookmarksFlyoutContent x:Name="BookmarksFlyoutContent" />
+                            </Flyout>
+                        </Button.Flyout>
+                    </Button>
+                    <!--#endregion BookmarksButton-->
+
                     <!--#region TimerButton-->
                     <Button
                         Background="Transparent"
