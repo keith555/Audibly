@@ -2,6 +2,7 @@
 // Updated: 08/02/2025
 
 using System;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -11,9 +12,11 @@ using Windows.Media.Playback;
 using Audibly.App.Extensions;
 using Audibly.App.Helpers;
 using Audibly.App.Services;
+using Audibly.Models;
 using CommunityToolkit.WinUI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml.Controls;
+using Constants = Audibly.App.Helpers.Constants;
 
 namespace Audibly.App.ViewModels;
 
@@ -47,6 +50,8 @@ public class PlayerViewModel : BindableBase, IDisposable
 
     private bool _pendingAutoPlay;
 
+    private long? _pendingSeekMs;
+
     private double _playbackSpeed = 1.0;
 
     private Symbol _playPauseIcon = Symbol.Play;
@@ -71,6 +76,11 @@ public class PlayerViewModel : BindableBase, IDisposable
     ///     so that the slider doesn't fight with the user's drag.
     /// </summary>
     public bool IsUserSeeking { get; set; }
+
+    /// <summary>
+    ///     Bookmarks for the currently playing audiobook, ordered by source file index then position.
+    /// </summary>
+    public ObservableCollection<Bookmark> CurrentBookmarks { get; } = [];
 
     /// <summary>
     ///     Gets or sets the currently playing audiobook.
@@ -408,6 +418,8 @@ public class PlayerViewModel : BindableBase, IDisposable
         });
 
         MediaPlayer.Source = MediaSource.CreateFromUri(audiobook.CurrentSourceFile.FilePath.AsUri());
+
+        _ = LoadBookmarksAsync();
     }
 
     public async void OpenSourceFile(int index, int chapterIndex)
@@ -442,6 +454,170 @@ public class PlayerViewModel : BindableBase, IDisposable
         await NowPlaying.SaveAsync();
     }
 
+    /// <summary>
+    ///     Loads the persisted bookmarks for the currently playing audiobook into <see cref="CurrentBookmarks" />.
+    /// </summary>
+    public async Task LoadBookmarksAsync()
+    {
+        if (NowPlaying == null)
+        {
+            await _dispatcherQueue.EnqueueAsync(() => CurrentBookmarks.Clear());
+            return;
+        }
+
+        var items = (await App.Repository.Bookmarks.GetByAudiobookAsync(NowPlaying.Id)).ToList();
+
+        await _dispatcherQueue.EnqueueAsync(() =>
+        {
+            CurrentBookmarks.Clear();
+            foreach (var b in items.OrderBy(b => GetSourceFileIndex(b.SourceFileId)).ThenBy(b => b.PositionMs))
+                CurrentBookmarks.Add(b);
+        });
+    }
+
+    private int GetSourceFileIndex(Guid sourceFileId)
+    {
+        if (NowPlaying == null) return 0;
+        var sf = NowPlaying.SourcePaths.FirstOrDefault(s => s.Id == sourceFileId);
+        return sf?.Index ?? int.MaxValue;
+    }
+
+    /// <summary>
+    ///     Creates and persists a new bookmark at the current playback position.
+    /// </summary>
+    public Task<Bookmark?> SaveBookmarkAtCurrentPositionAsync(string note)
+    {
+        if (NowPlaying == null) return Task.FromResult<Bookmark?>(null);
+        return SaveBookmarkAsync(NowPlaying.CurrentSourceFile.Id,
+            (long)CurrentPosition.TotalMilliseconds, note);
+    }
+
+    public async Task<Bookmark?> SaveBookmarkAsync(Guid sourceFileId, long positionMs, string note)
+    {
+        if (NowPlaying == null) return null;
+
+        var bookmark = new Bookmark
+        {
+            AudiobookId = NowPlaying.Id,
+            SourceFileId = sourceFileId,
+            PositionMs = positionMs,
+            Note = note ?? string.Empty
+        };
+
+        var saved = await App.Repository.Bookmarks.UpsertAsync(bookmark);
+        if (saved == null) return null;
+
+        await _dispatcherQueue.EnqueueAsync(() => InsertBookmarkOrdered(saved));
+        return saved;
+    }
+
+    /// <summary>
+    ///     Updates an existing bookmark (e.g. edited note) and re-sorts the collection.
+    /// </summary>
+    public async Task<bool> UpdateBookmarkAsync(Bookmark bookmark)
+    {
+        if (bookmark == null) return false;
+
+        var saved = await App.Repository.Bookmarks.UpsertAsync(bookmark);
+        if (saved == null) return false;
+
+        await _dispatcherQueue.EnqueueAsync(() =>
+        {
+            var existing = CurrentBookmarks.FirstOrDefault(b => b.Id == saved.Id);
+            if (existing != null) CurrentBookmarks.Remove(existing);
+            InsertBookmarkOrdered(saved);
+        });
+        return true;
+    }
+
+    /// <summary>
+    ///     Deletes a bookmark and removes it from the collection.
+    /// </summary>
+    public async Task DeleteBookmarkAsync(Bookmark bookmark)
+    {
+        if (bookmark == null) return;
+
+        await App.Repository.Bookmarks.DeleteAsync(bookmark.Id);
+        await _dispatcherQueue.EnqueueAsync(() =>
+        {
+            var existing = CurrentBookmarks.FirstOrDefault(b => b.Id == bookmark.Id);
+            if (existing != null) CurrentBookmarks.Remove(existing);
+        });
+    }
+
+    /// <summary>
+    ///     Seeks playback to the bookmark's position, switching source files if needed.
+    /// </summary>
+    public async Task SeekToBookmarkAsync(Bookmark bookmark)
+    {
+        if (NowPlaying == null || bookmark == null) return;
+
+        var sourceFile = NowPlaying.SourcePaths.FirstOrDefault(s => s.Id == bookmark.SourceFileId);
+        if (sourceFile == null) return;
+
+        if (NowPlaying.CurrentSourceFileIndex != sourceFile.Index)
+        {
+            var targetChapter = NowPlaying.Chapters.FirstOrDefault(c =>
+                                    c.ParentSourceFileIndex == sourceFile.Index &&
+                                    bookmark.PositionMs >= c.StartTime &&
+                                    bookmark.PositionMs <= c.EndTime) ??
+                                NowPlaying.Chapters.FirstOrDefault(c =>
+                                    c.ParentSourceFileIndex == sourceFile.Index);
+            if (targetChapter == null) return;
+
+            _pendingSeekMs = bookmark.PositionMs;
+            _pendingAutoPlay = true;
+            OpenSourceFile(sourceFile.Index, targetChapter.Index);
+            return;
+        }
+
+        CurrentPosition = TimeSpan.FromMilliseconds(bookmark.PositionMs);
+        MediaPlayer.Play();
+        await NowPlaying.SaveAsync();
+    }
+
+    /// <summary>
+    ///     Returns a human-readable chapter title + time label for a bookmark.
+    /// </summary>
+    public string FormatBookmarkLocation(Bookmark bookmark)
+    {
+        if (bookmark == null || NowPlaying == null) return string.Empty;
+
+        var sourceFile = NowPlaying.SourcePaths.FirstOrDefault(s => s.Id == bookmark.SourceFileId);
+        var chapter = sourceFile == null
+            ? null
+            : NowPlaying.Chapters.FirstOrDefault(c =>
+                c.ParentSourceFileIndex == sourceFile.Index &&
+                bookmark.PositionMs >= c.StartTime &&
+                bookmark.PositionMs <= c.EndTime);
+
+        var time = FormatMs(bookmark.PositionMs);
+        return chapter != null ? $"{chapter.Title} • {time}" : time;
+    }
+
+    internal static string FormatMs(long ms)
+    {
+        var t = TimeSpan.FromMilliseconds(ms);
+        return t.TotalHours >= 1
+            ? $"{(int)t.TotalHours}:{t:mm\\:ss}"
+            : $"{t:mm\\:ss}";
+    }
+
+    private void InsertBookmarkOrdered(Bookmark bookmark)
+    {
+        var sfIndex = GetSourceFileIndex(bookmark.SourceFileId);
+        var i = 0;
+        while (i < CurrentBookmarks.Count)
+        {
+            var other = CurrentBookmarks[i];
+            var otherSf = GetSourceFileIndex(other.SourceFileId);
+            if (otherSf > sfIndex || (otherSf == sfIndex && other.PositionMs > bookmark.PositionMs))
+                break;
+            i++;
+        }
+        CurrentBookmarks.Insert(i, bookmark);
+    }
+
     #endregion
 
     #region event handlers
@@ -467,12 +643,15 @@ public class PlayerViewModel : BindableBase, IDisposable
 
             ChapterDurationMs = (int)(NowPlaying.CurrentChapter.EndTime - NowPlaying.CurrentChapter.StartTime);
 
+            var resumeMs = _pendingSeekMs ?? NowPlaying.CurrentTimeMs;
+            _pendingSeekMs = null;
+
             ChapterPositionMs =
-                NowPlaying.CurrentTimeMs > NowPlaying.CurrentChapter.StartTime
-                    ? (int)(NowPlaying.CurrentTimeMs - NowPlaying.CurrentChapter.StartTime)
+                resumeMs > NowPlaying.CurrentChapter.StartTime
+                    ? (int)(resumeMs - NowPlaying.CurrentChapter.StartTime)
                     : 0;
 
-            CurrentPosition = TimeSpan.FromMilliseconds(NowPlaying.CurrentTimeMs);
+            CurrentPosition = TimeSpan.FromMilliseconds(resumeMs);
 
             MediaPlayer.PlaybackRate = PlaybackSpeed;
 

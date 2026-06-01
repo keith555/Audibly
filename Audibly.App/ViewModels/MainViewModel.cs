@@ -16,6 +16,7 @@ using Audibly.App.Extensions;
 using Audibly.App.Helpers;
 using Audibly.App.Services;
 using Audibly.App.Services.Interfaces;
+using Audibly.App.Views.ContentDialogs;
 using Audibly.Models;
 using CommunityToolkit.WinUI;
 using Microsoft.UI.Dispatching;
@@ -46,6 +47,7 @@ public class MainViewModel : BindableBase
     public readonly IFileDialogService FileDialogService;
     public readonly IImportFiles FileImporter;
     public readonly IloggingService LoggingService;
+    public readonly IBookmarkImportService BookmarkImporter;
 
     private CancellationTokenSource? _cancellationTokenSource;
 
@@ -72,12 +74,13 @@ public class MainViewModel : BindableBase
     ///     Creates a new MainViewModel.
     /// </summary>
     public MainViewModel(IImportFiles fileImporter, IAppDataService appDataService, IloggingService loggingService,
-        IFileDialogService fileDialogService)
+        IFileDialogService fileDialogService, IBookmarkImportService bookmarkImporter)
     {
         FileImporter = fileImporter;
         AppDataService = appDataService;
         LoggingService = loggingService;
         FileDialogService = fileDialogService;
+        BookmarkImporter = bookmarkImporter;
 
         DefaultPlaybackSpeed = UserSettings.PlaybackSpeed;
         DefaultVolume = UserSettings.Volume;
@@ -1373,6 +1376,114 @@ public class MainViewModel : BindableBase
 
         stopwatch.Stop();
         LoggingService.Log($"Imported {totalBooks} audiobooks in {stopwatch.Elapsed} seconds.");
+    }
+
+    #endregion
+
+    #region Musicolet Bookmark Import
+
+    /// <summary>
+    ///     Prompts the user for multiple Musicolet bookmark .txt files and imports them.
+    ///     Files are matched to source files by filename (without extension).
+    /// </summary>
+    public async void ImportMusicoletBookmarksAsync(object sender, RoutedEventArgs e)
+    {
+        var openPicker = new FileOpenPicker();
+        var window = App.Window;
+        var hWnd = WindowNative.GetWindowHandle(window);
+        InitializeWithWindow.Initialize(openPicker, hWnd);
+        openPicker.SuggestedStartLocation = PickerLocationId.Desktop;
+        openPicker.ViewMode = PickerViewMode.Thumbnail;
+        openPicker.FileTypeFilter.Add(".txt");
+
+        var files = await openPicker.PickMultipleFilesAsync();
+        if (files == null || files.Count == 0) return;
+
+        await _dispatcherQueue.EnqueueAsync(() => IsLoading = true);
+
+        _cancellationTokenSource = new CancellationTokenSource();
+        var token = _cancellationTokenSource.Token;
+
+        BookmarkImportReport? report = null;
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            Task ProgressCallback(int progress, int total, string fileName) => Task.CompletedTask;
+
+            async Task<bool> MergePrompt(string fileName, int existingCount)
+            {
+                var result = await DialogService.ShowConfirmationDialogAsync(
+                    "Bookmarks Already Exist",
+                    $"{existingCount} bookmark(s) already exist for \"{fileName}\". Merge with imported bookmarks?",
+                    "Merge",
+                    "Skip file");
+                return result == ContentDialogResult.Primary;
+            }
+
+            async Task<(BookmarkConflictChoice choice, bool applyToAll)> ConflictResolver(
+                string location, string existingNote, string newNote)
+            {
+                return await DialogService.ShowBookmarkConflictDialogAsync(location, existingNote, newNote);
+            }
+
+            report = await BookmarkImporter.ImportMusicoletAsync(
+                files.ToList(), token, ProgressCallback, MergePrompt, ConflictResolver);
+        }
+        catch (OperationCanceledException)
+        {
+            EnqueueNotification(new Notification
+            {
+                Message = "Bookmark import was cancelled!", Severity = InfoBarSeverity.Warning
+            });
+        }
+        catch (Exception exception)
+        {
+            EnqueueNotification(new Notification
+            {
+                Message = "Failed to import bookmarks!", Severity = InfoBarSeverity.Error
+            });
+            LoggingService.LogError(exception, true);
+        }
+
+        await _dispatcherQueue.EnqueueAsync(() => IsLoading = false);
+        stopwatch.Stop();
+
+        if (report == null) return;
+
+        if (report.BookmarksAdded + report.BookmarksReplaced > 0)
+        {
+            if (App.PlayerViewModel.NowPlaying != null)
+                await App.PlayerViewModel.LoadBookmarksAsync();
+
+            EnqueueNotification(new Notification
+            {
+                Message =
+                    $"Imported {report.BookmarksAdded} new, replaced {report.BookmarksReplaced} " +
+                    $"across {report.MatchedFiles} file(s).",
+                Severity = InfoBarSeverity.Success
+            });
+        }
+
+        if (report.UnmatchedFiles > 0)
+            EnqueueNotification(new Notification
+            {
+                Message = $"{report.UnmatchedFiles} file(s) had no matching audiobook part: " +
+                          string.Join(", ", report.UnmatchedFileNames.Take(5)) +
+                          (report.UnmatchedFileNames.Count > 5 ? "..." : string.Empty),
+                Severity = InfoBarSeverity.Warning
+            });
+
+        if (report.SkippedFiles > 0)
+            EnqueueNotification(new Notification
+            {
+                Message = $"Skipped {report.SkippedFiles} file(s) with existing bookmarks.",
+                Severity = InfoBarSeverity.Informational
+            });
+
+        LoggingService.Log(
+            $"Musicolet import: {report.BookmarksAdded} added, {report.BookmarksReplaced} replaced, " +
+            $"{report.BookmarksSkipped} skipped, {report.UnmatchedFiles} unmatched in {stopwatch.Elapsed}.");
     }
 
     #endregion

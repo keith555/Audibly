@@ -21,4 +21,7 @@ public class SqlAudiblyRepository : IAudiblyRepository
 
     public IAudiobookRepository Audiobooks => new SqlAudiobookRepository(
         new AudiblyContext(_dbContextOptions));
+
+    public IBookmarkRepository Bookmarks => new SqlBookmarkRepository(
+        new AudiblyContext(_dbContextOptions));
 }
