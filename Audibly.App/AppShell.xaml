@@ -80,6 +80,15 @@
                         <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE768;" />
                     </muxc:NavigationViewItem.Icon>
                 </muxc:NavigationViewItem>
+                <muxc:NavigationViewItem
+                    x:Name="BookmarksMenuItem"
+                    Content="{x:Bind BookmarksLabel}"
+                    Tag="BookmarksPage"
+                    ToolTipService.ToolTip="{x:Bind BookmarksLabel}">
+                    <muxc:NavigationViewItem.Icon>
+                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE8A4;" />
+                    </muxc:NavigationViewItem.Icon>
+                </muxc:NavigationViewItem>
             </muxc:NavigationView.MenuItems>
 
             <NavigationView.AutoSuggestBox>

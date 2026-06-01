@@ -202,6 +202,31 @@
                         </AppBarButton.Flyout>
                     </AppBarButton>
                     <AppBarSeparator />
+                    <AppBarButton
+                        Label="Bookmarks"
+                        ToolTipService.ToolTip="Bookmarks">
+                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE8A4;" />
+                        <AppBarButton.Flyout>
+                            <MenuFlyout Placement="BottomEdgeAlignedLeft">
+                                <MenuFlyoutItem
+                                    Click="BrowseBookmarks_OnClick"
+                                    Text="Browse bookmarks">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE8A4;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem
+                                    Click="ImportMusicoletBookmarks_OnClick"
+                                    Text="Import Musicolet bookmarks (.txt)">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE8B5;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                            </MenuFlyout>
+                        </AppBarButton.Flyout>
+                    </AppBarButton>
+                    <AppBarSeparator />
 
                     <!--  zoom drop down button  -->
                     <AppBarButton

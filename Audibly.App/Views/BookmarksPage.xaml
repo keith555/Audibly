@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8" ?>
+
+<Page
+    mc:Ignorable="d"
+    x:Class="Audibly.App.Views.BookmarksPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:Audibly.App.ViewModels"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid Padding="24,16,24,16" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TextBlock
+            Grid.Row="0"
+            Style="{StaticResource TitleTextBlockStyle}"
+            Text="Bookmarks" />
+
+        <Grid Grid.Row="1" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <AutoSuggestBox
+                Grid.Column="0"
+                PlaceholderText="Filter by book, chapter or note..."
+                QueryIcon="Find"
+                TextChanged="FilterBox_TextChanged"
+                x:Name="FilterBox" />
+            <TextBlock
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Grid.Column="1"
+                Style="{StaticResource BodyTextBlockStyle}"
+                VerticalAlignment="Center"
+                x:Name="CountText" />
+            <Button
+                Click="Refresh_OnClick"
+                Grid.Column="2"
+                ToolTipService.ToolTip="Refresh">
+                <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE72C;" />
+            </Button>
+        </Grid>
+
+        <Grid Grid.Row="2">
+            <TextBlock
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                HorizontalAlignment="Center"
+                Style="{StaticResource BodyTextBlockStyle}"
+                Text="No bookmarks yet."
+                VerticalAlignment="Center"
+                Visibility="Collapsed"
+                x:Name="EmptyText" />
+
+            <ListView
+                ItemsSource="{x:Bind FilteredItems, Mode=OneWay}"
+                SelectionMode="None"
+                x:Name="BookmarksList">
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Padding" Value="12,10" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="vm:BookmarkBrowseItem">
+                        <Grid ColumnSpacing="12" HorizontalAlignment="Stretch">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="4">
+                                <TextBlock
+                                    FontWeight="SemiBold"
+                                    Text="{x:Bind BookTitle}"
+                                    TextTrimming="CharacterEllipsis" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="{x:Bind Location}"
+                                    TextTrimming="CharacterEllipsis" />
+                                <TextBlock
+                                    Text="{x:Bind Note, Mode=OneWay}"
+                                    TextTrimming="CharacterEllipsis"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel
+                                Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="4"
+                                VerticalAlignment="Center">
+                                <Button
+                                    BorderThickness="0"
+                                    Click="EditBookmark_OnClick"
+                                    Tag="{x:Bind}"
+                                    ToolTipService.ToolTip="Edit note">
+                                    <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE70F;" />
+                                </Button>
+                                <Button
+                                    BorderThickness="0"
+                                    Click="DeleteBookmark_OnClick"
+                                    Tag="{x:Bind}"
+                                    ToolTipService.ToolTip="Delete">
+                                    <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE74D;" />
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
+    </Grid>
+</Page>
