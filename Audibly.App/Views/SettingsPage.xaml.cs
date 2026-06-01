@@ -144,8 +144,4 @@ public sealed partial class SettingsPage : Page
         _ = Task.Run(async () => await ViewModel.SyncLibraryAsync(showProgressDialog: true));
     }
 
-    private void ImportMusicoletBookmarks_Click(object sender, RoutedEventArgs e)
-    {
-        ViewModel.ImportMusicoletBookmarksAsync(sender, e);
-    }
 }

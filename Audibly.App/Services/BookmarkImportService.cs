@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Storage;
@@ -16,6 +17,12 @@ namespace Audibly.App.Services;
 
 public class BookmarkImportService : IBookmarkImportService
 {
+    /// <summary>
+    ///     Matches a trailing " (N)" duplicate marker, e.g. "Foo (2)" → captures the suffix so the
+    ///     base name "Foo" is used for source-file matching.
+    /// </summary>
+    private static readonly Regex DuplicateSuffixRegex = new(@"\s*\(\d+\)$", RegexOptions.Compiled);
+
     public async Task<BookmarkImportReport> ImportMusicoletAsync(
         IReadOnlyList<StorageFile> files,
         CancellationToken cancellationToken,
@@ -38,40 +45,58 @@ public class BookmarkImportService : IBookmarkImportService
                 sourceIndex[key] = (ab, sf);
         }
 
+        // Group input files by their normalized base name so duplicates "(2)", "(3)" etc. merge
+        // into one logical import for the same source file.
+        var groups = files
+            .GroupBy(f => NormalizeKey(Path.GetFileNameWithoutExtension(f.Name)),
+                StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         BookmarkConflictChoice? stickyChoice = null;
 
-        for (var i = 0; i < files.Count; i++)
+        for (var gi = 0; gi < groups.Count; gi++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var file = files[i];
-            await progressCallback(i, files.Count, file.Name);
+            var group = groups[gi];
+            var groupFiles = group.ToList();
+            await progressCallback(gi, groups.Count, groupFiles[0].Name);
 
-            var key = Path.GetFileNameWithoutExtension(file.Name);
-
-            if (!sourceIndex.TryGetValue(key, out var match))
+            if (!sourceIndex.TryGetValue(group.Key, out var match))
             {
-                report.UnmatchedFiles++;
-                report.UnmatchedFileNames.Add(file.Name);
+                report.UnmatchedFiles += groupFiles.Count;
+                foreach (var f in groupFiles) report.UnmatchedFileNames.Add(f.Name);
                 continue;
             }
 
-            string text;
-            try
+            // Parse every file in the group and amalgamate by position (later file wins on collision).
+            var combined = new Dictionary<long, MusicoletBookmarkParser.ParsedBookmark>();
+            var readFailed = 0;
+
+            foreach (var file in groupFiles)
             {
-                text = await FileIO.ReadTextAsync(file);
-            }
-            catch
-            {
-                report.UnmatchedFiles++;
-                report.UnmatchedFileNames.Add(file.Name);
-                continue;
+                string text;
+                try
+                {
+                    text = await FileIO.ReadTextAsync(file);
+                }
+                catch
+                {
+                    readFailed++;
+                    report.UnmatchedFileNames.Add(file.Name);
+                    continue;
+                }
+
+                foreach (var entry in MusicoletBookmarkParser.Parse(text))
+                    combined[entry.PositionMs] = entry;
             }
 
-            var parsed = MusicoletBookmarkParser.Parse(text);
-            if (parsed.Count == 0)
+            report.UnmatchedFiles += readFailed;
+            var matchedInGroup = groupFiles.Count - readFailed;
+
+            if (combined.Count == 0)
             {
-                report.MatchedFiles++;
+                report.MatchedFiles += matchedInGroup;
                 continue;
             }
 
@@ -79,21 +104,24 @@ public class BookmarkImportService : IBookmarkImportService
 
             if (existing.Count > 0)
             {
-                var mergeOk = await mergePrompt(file.Name, existing.Count);
+                var promptName = groupFiles.Count == 1
+                    ? groupFiles[0].Name
+                    : $"{group.Key} ({groupFiles.Count} files)";
+                var mergeOk = await mergePrompt(promptName, existing.Count);
                 if (!mergeOk)
                 {
-                    report.SkippedFiles++;
+                    report.SkippedFiles += matchedInGroup;
                     continue;
                 }
             }
 
-            report.MatchedFiles++;
+            report.MatchedFiles += matchedInGroup;
 
             var existingByPosition = existing.ToDictionary(b => b.PositionMs);
             var toAdd = new List<Bookmark>();
             var toReplace = new List<Bookmark>();
 
-            foreach (var entry in parsed)
+            foreach (var entry in combined.Values.OrderBy(e => e.PositionMs))
             {
                 if (!existingByPosition.TryGetValue(entry.PositionMs, out var dup))
                 {
@@ -150,9 +178,15 @@ public class BookmarkImportService : IBookmarkImportService
             }
         }
 
-        await progressCallback(files.Count, files.Count, string.Empty);
+        await progressCallback(groups.Count, groups.Count, string.Empty);
         return report;
     }
+
+    /// <summary>
+    ///     Strips a trailing duplicate marker (e.g. " (2)") so "Foo (2)" matches the source file named "Foo".
+    /// </summary>
+    private static string NormalizeKey(string name) =>
+        string.IsNullOrEmpty(name) ? name : DuplicateSuffixRegex.Replace(name, string.Empty);
 
     private static string FormatPosition(long ms)
     {

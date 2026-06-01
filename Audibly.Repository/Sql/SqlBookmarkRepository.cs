@@ -9,6 +9,16 @@ namespace Audibly.Repository.Sql;
 
 public class SqlBookmarkRepository(AudiblyContext db) : IBookmarkRepository
 {
+    public async Task<IEnumerable<Bookmark>> GetAllAsync()
+    {
+        return await db.Bookmarks
+            .OrderBy(b => b.AudiobookId)
+            .ThenBy(b => b.SourceFileId)
+            .ThenBy(b => b.PositionMs)
+            .AsNoTracking()
+            .ToListAsync();
+    }
+
     public async Task<IEnumerable<Bookmark>> GetByAudiobookAsync(Guid audiobookId)
     {
         return await db.Bookmarks

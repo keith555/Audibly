@@ -8,6 +8,11 @@ namespace Audibly.Repository.Interfaces;
 public interface IBookmarkRepository
 {
     /// <summary>
+    ///     Returns every bookmark in the library, ordered by audiobook then source file then position.
+    /// </summary>
+    Task<IEnumerable<Bookmark>> GetAllAsync();
+
+    /// <summary>
     ///     Returns all bookmarks belonging to the given audiobook, ordered by source file index then position.
     /// </summary>
     Task<IEnumerable<Bookmark>> GetByAudiobookAsync(Guid audiobookId);

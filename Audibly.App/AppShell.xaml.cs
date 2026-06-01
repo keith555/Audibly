@@ -31,6 +31,7 @@ public sealed partial class AppShell : Page
 
     public readonly string LibraryLabel = "Library";
     public readonly string NowPlayingLabel = "Now Playing";
+    public readonly string BookmarksLabel = "Bookmarks";
 
     /// <summary>
     ///     Initializes a new instance of the AppShell, sets the static 'Current' reference,
@@ -153,6 +154,11 @@ public sealed partial class AppShell : Page
             PlayerViewModel.IsPlayerFullScreen = true;
             PlayerViewModel.MaximizeMinimizeGlyph = Constants.MinimizeGlyph;
         }
+        else if (item == BookmarksMenuItem)
+        {
+            if (AppAppShellFrame.Content is BookmarksPage) return;
+            AppAppShellFrame.Navigate(typeof(BookmarksPage));
+        }
         else if (item == (NavigationViewItem)NavView.SettingsItem)
         {
             if (AppAppShellFrame.Content is SettingsPage) return;
@@ -169,6 +175,7 @@ public sealed partial class AppShell : Page
         // if (e.SourcePageType == typeof(LibraryPage)) NavView.SelectedItem = AudiobookListMenuItem;
         if (e.SourcePageType == typeof(LibraryCardPage)) NavView.SelectedItem = LibraryCardMenuItem;
         else if (e.SourcePageType == typeof(PlayerPage)) NavView.SelectedItem = NowPlayingMenuItem;
+        else if (e.SourcePageType == typeof(BookmarksPage)) NavView.SelectedItem = BookmarksMenuItem;
         else if (e.SourcePageType == typeof(SettingsPage)) NavView.SelectedItem = NavView.SettingsItem;
     }
 

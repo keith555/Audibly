@@ -121,6 +121,16 @@ public sealed partial class LibraryCardPage : Page
         await ViewModel.GetAudiobookListAsync();
     }
 
+    private void ImportMusicoletBookmarks_OnClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ImportMusicoletBookmarksAsync(sender, e);
+    }
+
+    private void BrowseBookmarks_OnClick(object sender, RoutedEventArgs e)
+    {
+        Frame.Navigate(typeof(BookmarksPage));
+    }
+
     /// <summary>
     ///     Resets the audiobook list.
     /// </summary>
