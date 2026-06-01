@@ -39,38 +39,137 @@ public class FileImportService : IImportFiles
     public async Task ImportDirectoryAsync(string path, CancellationToken cancellationToken,
         Func<int, int, string, bool, Task> progressCallback, bool notifyUser = true)
     {
-        var didFail = false;
-
         var files = Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
             .Where(file => file.EndsWith(".m4b", StringComparison.OrdinalIgnoreCase) ||
                            file.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
             .ToList();
-        var numberOfFiles = files.Count;
 
-        var filesList = files.AsList();
+        // Group files by parent directory so a folder of per-chapter files imports as one
+        // audiobook instead of one entry per file. Folders with a single audio file fall through
+        // the existing single-file path unchanged.
+        var groups = files
+            .GroupBy(file => Path.GetDirectoryName(file) ?? string.Empty)
+            .Select(g => g.OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray())
+            .ToList();
+        var numberOfGroups = groups.Count;
 
-        foreach (var file in files)
+        for (var i = 0; i < numberOfGroups; i++)
         {
-            // Check if cancellation was requested
             cancellationToken.ThrowIfCancellationRequested();
 
-            var audiobook = await CreateAudiobook(file, notifyUser: notifyUser);
+            var group = groups[i];
+            var didFail = false;
+            Audiobook? audiobook;
 
-            if (audiobook == null) didFail = true;
-
-            if (audiobook != null)
+            if (group.Length == 1)
             {
-                // insert the audiobook into the database
-                var result = await App.Repository.Audiobooks.UpsertAsync(audiobook);
-                if (result == null) didFail = true;
+                audiobook = await CreateAudiobook(group[0], notifyUser: notifyUser);
+
+                if (audiobook == null)
+                {
+                    didFail = true;
+                }
+                else
+                {
+                    var result = await App.Repository.Audiobooks.UpsertAsync(audiobook);
+                    if (result == null) didFail = true;
+                }
+            }
+            else
+            {
+                // Phase 1: capture pre-grouping per-chapter entries and their bookmarks before
+                // we touch the database. Only single-file entries that aren't currently playing
+                // are eligible — existing multi-file books are left alone, and we never disrupt
+                // active playback mid-sync.
+                var stalePerChapter = new List<(Audiobook stale, List<Bookmark> bookmarks)>();
+                foreach (var filePath in group)
+                {
+                    var stale = await App.Repository.Audiobooks.GetByFilePathAsync(filePath);
+                    if (stale == null || stale.SourcePaths.Count != 1 || stale.IsNowPlaying) continue;
+
+                    var bookmarks = (await App.Repository.Bookmarks.GetByAudiobookAsync(stale.Id)).ToList();
+                    stalePerChapter.Add((stale, bookmarks));
+                }
+
+                audiobook = await CreateAudiobookFromMultipleFiles(group);
+
+                if (audiobook != null)
+                {
+                    var existing = await App.Repository.Audiobooks.GetByTitleAuthorComposerAsync(
+                        audiobook.Title, audiobook.Author, audiobook.Composer);
+                    if (existing != null)
+                    {
+                        // Dedup collision — leave the captured per-chapter entries intact rather
+                        // than blasting them, since we're not actually replacing them.
+                        App.ViewModel.LoggingService.LogError(
+                            new Exception("Audiobook already exists in the database"));
+                        if (notifyUser)
+                            App.ViewModel.EnqueueNotification(new Notification
+                            {
+                                Message = $"Audiobook is already in the library: {existing.Title}",
+                                Severity = InfoBarSeverity.Warning
+                            });
+                        audiobook = null;
+                    }
+                }
+
+                if (audiobook == null)
+                {
+                    didFail = true;
+                }
+                else
+                {
+                    // Persist the new combined audiobook first so its (and its SourceFiles')
+                    // Ids are assigned, which we need to re-key bookmarks against.
+                    var result = await App.Repository.Audiobooks.UpsertAsync(audiobook);
+                    if (result == null)
+                    {
+                        didFail = true;
+                    }
+                    else if (stalePerChapter.Count > 0)
+                    {
+                        // Transfer bookmarks: for each stale single-file entry, re-create its
+                        // bookmarks against the matching SourceFile on the new combined entry,
+                        // matched by FilePath (stable across regrouping). PositionMs is an
+                        // offset within the audio file, so it carries over verbatim. Preserve
+                        // the original CreatedAt so user-visible timestamps don't reset.
+                        var newSourceByPath = audiobook.SourcePaths
+                            .ToDictionary(sf => sf.FilePath, StringComparer.OrdinalIgnoreCase);
+
+                        var transferred = new List<Bookmark>();
+                        foreach (var (stale, bookmarks) in stalePerChapter)
+                        {
+                            var stalePath = stale.SourcePaths[0].FilePath;
+                            if (!newSourceByPath.TryGetValue(stalePath, out var newSf)) continue;
+
+                            foreach (var b in bookmarks)
+                                transferred.Add(new Bookmark
+                                {
+                                    AudiobookId = audiobook.Id,
+                                    SourceFileId = newSf.Id,
+                                    PositionMs = b.PositionMs,
+                                    Note = b.Note,
+                                    CreatedAt = b.CreatedAt
+                                });
+                        }
+
+                        if (transferred.Count > 0)
+                            await App.Repository.Bookmarks.AddManyAsync(transferred);
+
+                        // Now remove the stale per-chapter entries. The FK cascade also drops
+                        // the original bookmark rows — fine, we've already duplicated them
+                        // onto the new entry.
+                        foreach (var (stale, _) in stalePerChapter)
+                        {
+                            await App.Repository.Audiobooks.DeleteAsync(stale.Id);
+                            await App.ViewModel.AppDataService.DeleteCoverImageAsync(stale.CoverImagePath);
+                        }
+                    }
+                }
             }
 
-            var title = audiobook?.Title ?? Path.GetFileNameWithoutExtension(file);
-
-            // report progress
-            await progressCallback(filesList.IndexOf(file), numberOfFiles, title, didFail);
-
-            didFail = false;
+            var title = audiobook?.Title ?? Path.GetFileNameWithoutExtension(group[0]);
+            await progressCallback(i, numberOfGroups, title, didFail);
         }
 
         ImportCompleted?.Invoke();
@@ -250,7 +349,10 @@ public class FileImportService : IImportFiles
                 // check if this is the 1st file
                 if (audiobook.SourcePaths.Count == 0)
                 {
-                    audiobook.Title = track.Title;
+                    // Per-chapter mp3 books typically tag Title as "Chapter N" and the actual
+                    // book title as Album. Prefer Album when present so the combined entry
+                    // doesn't end up labelled "Chapter 1" in the library.
+                    audiobook.Title = string.IsNullOrWhiteSpace(track.Album) ? track.Title : track.Album;
                     audiobook.Composer = track.Composer;
                     audiobook.Author = track.Artist;
                     audiobook.Description =
