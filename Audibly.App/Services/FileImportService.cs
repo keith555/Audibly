@@ -44,20 +44,19 @@ public class FileImportService : IImportFiles
                            file.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        // Group files by parent directory so a folder of per-chapter files imports as one
-        // audiobook instead of one entry per file. Folders with a single audio file fall through
-        // the existing single-file path unchanged.
-        var groups = files
-            .GroupBy(file => Path.GetDirectoryName(file) ?? string.Empty)
-            .Select(g => g.OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray())
-            .ToList();
+        // Group files into per-audiobook units. Each folder of audio files becomes a group;
+        // additionally a "book root with disc subfolders" layout (multiple sibling subdirs of
+        // audio that share an Artist and a non-trivial common Album prefix) is detected and
+        // merged into one group. titleOverride is the derived merged title for multi-disc
+        // groups; null for ordinary single-folder groups.
+        var groups = GroupAudioFilesForImport(files);
         var numberOfGroups = groups.Count;
 
         for (var i = 0; i < numberOfGroups; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var group = groups[i];
+            var (group, titleOverride) = groups[i];
             var didFail = false;
             Audiobook? audiobook;
 
@@ -77,30 +76,36 @@ public class FileImportService : IImportFiles
             }
             else
             {
-                // Phase 1: capture pre-grouping per-chapter entries and their bookmarks before
-                // we touch the database. Only single-file entries that aren't currently playing
-                // are eligible — existing multi-file books are left alone, and we never disrupt
-                // active playback mid-sync.
-                var stalePerChapter = new List<(Audiobook stale, List<Bookmark> bookmarks)>();
+                // Phase 1: capture stale audiobooks that this new combined entry fully
+                // supersedes, along with their bookmarks, before we touch the database. A stale
+                // entry is eligible if *every* one of its source paths is in the new group —
+                // covers both old per-chapter single-file imports (1 path) and old per-disc
+                // multi-file imports (25-ish paths). Currently playing entries and entries
+                // whose source paths extend beyond this group are left untouched.
+                var newPathSet = new HashSet<string>(group, StringComparer.OrdinalIgnoreCase);
+                var staleSuperseded = new List<(Audiobook stale, List<Bookmark> bookmarks)>();
+                var seenStaleIds = new HashSet<Guid>();
                 foreach (var filePath in group)
                 {
                     var stale = await App.Repository.Audiobooks.GetByFilePathAsync(filePath);
-                    if (stale == null || stale.SourcePaths.Count != 1 || stale.IsNowPlaying) continue;
+                    if (stale == null || stale.IsNowPlaying) continue;
+                    if (!seenStaleIds.Add(stale.Id)) continue;
+                    if (!stale.SourcePaths.All(sp => newPathSet.Contains(sp.FilePath))) continue;
 
                     var bookmarks = (await App.Repository.Bookmarks.GetByAudiobookAsync(stale.Id)).ToList();
-                    stalePerChapter.Add((stale, bookmarks));
+                    staleSuperseded.Add((stale, bookmarks));
                 }
 
-                audiobook = await CreateAudiobookFromMultipleFiles(group);
+                audiobook = await CreateAudiobookFromMultipleFiles(group, titleOverride);
 
                 if (audiobook != null)
                 {
                     var existing = await App.Repository.Audiobooks.GetByTitleAuthorComposerAsync(
                         audiobook.Title, audiobook.Author, audiobook.Composer);
-                    if (existing != null)
+                    if (existing != null && !seenStaleIds.Contains(existing.Id))
                     {
-                        // Dedup collision — leave the captured per-chapter entries intact rather
-                        // than blasting them, since we're not actually replacing them.
+                        // Genuine dedup collision (not one of the stale entries we're about to
+                        // replace). Leave everything intact.
                         App.ViewModel.LoggingService.LogError(
                             new Exception("Audiobook already exists in the database"));
                         if (notifyUser)
@@ -126,23 +131,25 @@ public class FileImportService : IImportFiles
                     {
                         didFail = true;
                     }
-                    else if (stalePerChapter.Count > 0)
+                    else if (staleSuperseded.Count > 0)
                     {
-                        // Transfer bookmarks: for each stale single-file entry, re-create its
-                        // bookmarks against the matching SourceFile on the new combined entry,
-                        // matched by FilePath (stable across regrouping). PositionMs is an
-                        // offset within the audio file, so it carries over verbatim. Preserve
-                        // the original CreatedAt so user-visible timestamps don't reset.
+                        // Transfer bookmarks: for each stale bookmark, find the stale SourceFile
+                        // it lives on (by SourceFileId), then map to the new SourceFile with the
+                        // same FilePath. PositionMs is an offset within the audio file so it
+                        // carries over verbatim. Preserve CreatedAt so user-visible timestamps
+                        // don't reset.
                         var newSourceByPath = audiobook.SourcePaths
                             .ToDictionary(sf => sf.FilePath, StringComparer.OrdinalIgnoreCase);
 
                         var transferred = new List<Bookmark>();
-                        foreach (var (stale, bookmarks) in stalePerChapter)
+                        foreach (var (stale, bookmarks) in staleSuperseded)
                         {
-                            var stalePath = stale.SourcePaths[0].FilePath;
-                            if (!newSourceByPath.TryGetValue(stalePath, out var newSf)) continue;
-
+                            var staleSourceById = stale.SourcePaths.ToDictionary(sf => sf.Id);
                             foreach (var b in bookmarks)
+                            {
+                                if (!staleSourceById.TryGetValue(b.SourceFileId, out var staleSf)) continue;
+                                if (!newSourceByPath.TryGetValue(staleSf.FilePath, out var newSf)) continue;
+
                                 transferred.Add(new Bookmark
                                 {
                                     AudiobookId = audiobook.Id,
@@ -151,15 +158,15 @@ public class FileImportService : IImportFiles
                                     Note = b.Note,
                                     CreatedAt = b.CreatedAt
                                 });
+                            }
                         }
 
                         if (transferred.Count > 0)
                             await App.Repository.Bookmarks.AddManyAsync(transferred);
 
-                        // Now remove the stale per-chapter entries. The FK cascade also drops
-                        // the original bookmark rows — fine, we've already duplicated them
-                        // onto the new entry.
-                        foreach (var (stale, _) in stalePerChapter)
+                        // Remove the superseded entries. The FK cascade also drops the original
+                        // bookmark rows — fine, we've already duplicated them onto the new entry.
+                        foreach (var (stale, _) in staleSuperseded)
                         {
                             await App.Repository.Audiobooks.DeleteAsync(stale.Id);
                             await App.ViewModel.AppDataService.DeleteCoverImageAsync(stale.CoverImagePath);
@@ -327,7 +334,8 @@ public class FileImportService : IImportFiles
 
     #endregion
 
-    private static async Task<Audiobook?> CreateAudiobookFromMultipleFiles(string[] paths)
+    private static async Task<Audiobook?> CreateAudiobookFromMultipleFiles(string[] paths,
+        string? titleOverride = null)
     {
         try
         {
@@ -351,8 +359,12 @@ public class FileImportService : IImportFiles
                 {
                     // Per-chapter mp3 books typically tag Title as "Chapter N" and the actual
                     // book title as Album. Prefer Album when present so the combined entry
-                    // doesn't end up labelled "Chapter 1" in the library.
-                    audiobook.Title = string.IsNullOrWhiteSpace(track.Album) ? track.Title : track.Album;
+                    // doesn't end up labelled "Chapter 1" in the library. A caller-supplied
+                    // titleOverride (e.g. the common Album prefix derived for a multi-disc
+                    // set) wins over both.
+                    audiobook.Title = !string.IsNullOrWhiteSpace(titleOverride)
+                        ? titleOverride
+                        : string.IsNullOrWhiteSpace(track.Album) ? track.Title : track.Album;
                     audiobook.Composer = track.Composer;
                     audiobook.Author = track.Artist;
                     audiobook.Description =
@@ -536,6 +548,165 @@ public class FileImportService : IImportFiles
             // log the error
             App.ViewModel.LoggingService.LogError(e, true);
             return null;
+        }
+    }
+
+    /// <summary>
+    ///     Group a flat list of audio file paths into per-audiobook units. Folders containing
+    ///     audio files become one group (the existing single-folder behaviour). On top of that,
+    ///     a "book root with disc subfolders" layout is detected and its sibling subfolders are
+    ///     merged into one group with a derived title.
+    ///
+    ///     Detection criteria for a multi-disc book root D:
+    ///       - D itself contains no audio files (only the subdirs, plus optional non-audio).
+    ///       - D has 2+ immediate subdirs that each contain audio files (recursively, via the
+    ///         per-directory groups list).
+    ///       - The first track of every subgroup shares an Artist (non-empty, case-insensitive).
+    ///       - The Album tags across subgroups share a common prefix of >=3 chars after trim.
+    ///
+    ///     The merged title is the common Album prefix (which is also a strong signal that this
+    ///     really is one book, not unrelated books happening to share an artist). Files are
+    ///     ordered using a natural-sort comparer so "Disc 10" comes after "Disc 2".
+    /// </summary>
+    private static List<(string[] files, string? titleOverride)> GroupAudioFilesForImport(
+        IEnumerable<string> files)
+    {
+        var perDirGroups = files
+            .GroupBy(f => Path.GetDirectoryName(f) ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(f => f, NaturalStringComparer.Instance).ToArray(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var result = new List<(string[] files, string? titleOverride)>();
+        var consumed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var clustersByBookRoot = perDirGroups
+            .GroupBy(kv => Path.GetDirectoryName(kv.Key) ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var cluster in clustersByBookRoot)
+        {
+            var bookRoot = cluster.Key;
+            var siblings = cluster.ToList();
+
+            // Need 2+ sibling subdir groups to be a multi-disc candidate.
+            if (siblings.Count < 2) continue;
+            // If the candidate book root has its own audio at the same level, this is a mixed
+            // layout (loose tracks alongside disc subdirs). Leave it alone — too risky to merge.
+            if (perDirGroups.ContainsKey(bookRoot)) continue;
+
+            // Read first-track metadata for each sibling. Bail on any read failure.
+            var metas = new List<(string dir, string artist, string album)>(siblings.Count);
+            var readOk = true;
+            foreach (var sib in siblings)
+                try
+                {
+                    var track = new Track(sib.Value[0]);
+                    metas.Add((sib.Key, (track.Artist ?? string.Empty).Trim(),
+                        (track.Album ?? string.Empty).Trim()));
+                }
+                catch
+                {
+                    readOk = false;
+                    break;
+                }
+
+            if (!readOk) continue;
+
+            // Gate 1: all siblings share a non-empty Artist.
+            var firstArtist = metas[0].artist;
+            if (string.IsNullOrEmpty(firstArtist)) continue;
+            if (metas.Any(m => !string.Equals(m.artist, firstArtist, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            // Gate 2: Album tags share a meaningful common prefix. This is what distinguishes a
+            // genuine multi-disc set (all Albums begin "Robinson Crusoe ...") from unrelated
+            // books that happen to share an Artist.
+            var commonAlbumPrefix = LongestCommonPrefixCI(metas.Select(m => m.album).ToList())
+                .TrimEnd(' ', '-', '_', '(', ',', '.', ':', '/', '[', '{');
+            if (commonAlbumPrefix.Length < 3) continue;
+
+            // Merge: combine all sibling files in natural-sort order of (subdir, then filename).
+            var mergedFiles = siblings
+                .OrderBy(kv => kv.Key, NaturalStringComparer.Instance)
+                .SelectMany(kv => kv.Value)
+                .ToArray();
+
+            result.Add((mergedFiles, commonAlbumPrefix));
+            foreach (var sib in siblings) consumed.Add(sib.Key);
+        }
+
+        // Anything not consumed by multi-disc merging stays as its own per-directory group.
+        foreach (var kv in perDirGroups)
+        {
+            if (consumed.Contains(kv.Key)) continue;
+            result.Add((kv.Value, null));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    ///     Longest common prefix across strings, case-insensitive. Returns characters from the
+    ///     first string so casing is preserved.
+    /// </summary>
+    private static string LongestCommonPrefixCI(IReadOnlyList<string> strs)
+    {
+        if (strs.Count == 0) return string.Empty;
+        var first = strs[0];
+        var len = first.Length;
+        for (var i = 1; i < strs.Count; i++)
+        {
+            var s = strs[i];
+            var bound = Math.Min(len, s.Length);
+            var j = 0;
+            while (j < bound && char.ToLowerInvariant(first[j]) == char.ToLowerInvariant(s[j]))
+                j++;
+            len = j;
+            if (len == 0) break;
+        }
+
+        return first[..len];
+    }
+
+    /// <summary>
+    ///     Comparer that orders embedded numeric runs by numeric value, so "Disc 2" sorts before
+    ///     "Disc 10". Non-digit runs compare case-insensitively.
+    /// </summary>
+    private sealed class NaturalStringComparer : IComparer<string>
+    {
+        public static readonly NaturalStringComparer Instance = new();
+
+        public int Compare(string? a, string? b)
+        {
+            if (a is null) return b is null ? 0 : -1;
+            if (b is null) return 1;
+
+            int i = 0, j = 0;
+            while (i < a.Length && j < b.Length)
+            {
+                if (char.IsDigit(a[i]) && char.IsDigit(b[j]))
+                {
+                    while (i < a.Length && a[i] == '0') i++;
+                    while (j < b.Length && b[j] == '0') j++;
+                    int iStart = i, jStart = j;
+                    while (i < a.Length && char.IsDigit(a[i])) i++;
+                    while (j < b.Length && char.IsDigit(b[j])) j++;
+                    int iLen = i - iStart, jLen = j - jStart;
+                    if (iLen != jLen) return iLen.CompareTo(jLen);
+                    var cmp = string.CompareOrdinal(a, iStart, b, jStart, iLen);
+                    if (cmp != 0) return cmp;
+                }
+                else
+                {
+                    var cmp = char.ToLowerInvariant(a[i]).CompareTo(char.ToLowerInvariant(b[j]));
+                    if (cmp != 0) return cmp;
+                    i++;
+                    j++;
+                }
+            }
+
+            return (a.Length - i).CompareTo(b.Length - j);
         }
     }
 }
