@@ -43,8 +43,12 @@ public class AppDataService : IAppDataService
 
             if (imageBytes == null)
             {
-                var coverImage = await AssetHelper.GetAssetFileAsync("DefaultCoverImage.png");
-                await coverImage.CopyAsync(bookAppdataDir, "CoverImage.png", NameCollisionOption.ReplaceExisting);
+                // Capture the copy's path, not the source asset's. The source lives in the
+                // install dir under WindowsApps/<package-id-with-version-hash>/, which becomes
+                // invalid on every reinstall.
+                var defaultCoverAsset = await AssetHelper.GetAssetFileAsync("DefaultCoverImage.png");
+                var coverImage = await defaultCoverAsset.CopyAsync(bookAppdataDir, "CoverImage.png",
+                    NameCollisionOption.ReplaceExisting);
                 coverImagePath = coverImage.Path;
             }
             else
